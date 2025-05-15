@@ -1,0 +1,49 @@
+transformers
+accelerate
+prometheus-client
+aixblock-ml
+aixblock-sdk
+aixblock-tools
+tensorboardX
+gradio #==3.50
+redis
+rq
+flask>=2.2
+flask-cors
+Werkzeug>=2.0
+gunicorn>=20.0
+colorama
+lxml
+appdirs
+gitpython
+centrifuge-python
+opencv-python>=4.1.1
+numpy
+grafana-api
+diffusers>=0.30.0
+datasets
+trl
+peft
+scipy
+bitsandbytes>=0.41.3
+langchain
+langchain_community
+nvidia-ml-py
+wandb
+langchain_huggingface
+huggingface-hub
+flask_swagger_ui
+pyyaml
+gradio_log
+tf-keras
+loguru
+about-time
+rich
+sparkdl
+validators
+triton
+sentencepiece==0.2.0
+mcp
+torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
+torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
