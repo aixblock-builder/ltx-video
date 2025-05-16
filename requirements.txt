@@ -47,3 +47,15 @@ mcp
 torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+
+# diffusers>=0.28.2
+# transformers==4.44.2
+# sentencepiece>=0.1.96
+wheel==0.44.0
+einops==0.8.0
+# accelerate==1.1.1
+matplotlib
+imageio[ffmpeg]
+# gradio==5.7.1
+gradio_toggle==2.0.2
+torchao

@@ -75,7 +75,167 @@ from misc import get_device_count
 from param_class import TrainingConfigFlux, TrainingConfigFluxLora
 from loguru import logger
 import gc
+import argparse
+import json
+import os
+import random
+from datetime import datetime
+from pathlib import Path
+from diffusers.utils import logging
 
+import imageio
+import numpy as np
+import safetensors.torch
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from transformers import T5EncoderModel, T5Tokenizer
+
+from ltx_video.models.autoencoders.causal_video_autoencoder import (
+    CausalVideoAutoencoder,
+)
+from ltx_video.models.transformers.symmetric_patchifier import SymmetricPatchifier
+from ltx_video.models.transformers.transformer3d import Transformer3DModel
+from ltx_video.pipelines.pipeline_ltx_video import LTXVideoPipeline
+from ltx_video.schedulers.rf import RectifiedFlowScheduler
+from ltx_video.utils.conditioning_method import ConditioningMethod
+
+
+MAX_HEIGHT = 720
+MAX_WIDTH = 1280
+MAX_NUM_FRAMES = 257
+
+
+def load_vae(vae_dir):
+    vae_ckpt_path = vae_dir / "vae_diffusion_pytorch_model.safetensors"
+    vae_config_path = vae_dir / "config.json"
+    with open(vae_config_path, "r") as f:
+        vae_config = json.load(f)
+    vae = CausalVideoAutoencoder.from_config(vae_config)
+    vae_state_dict = safetensors.torch.load_file(vae_ckpt_path)
+    vae.load_state_dict(vae_state_dict)
+    if torch.cuda.is_available():
+        vae = vae.cuda()
+    return vae.to(torch.bfloat16)
+
+
+def load_unet(unet_dir):
+    unet_ckpt_path = unet_dir / "unet_diffusion_pytorch_model.safetensors"
+    unet_config_path = unet_dir / "config.json"
+    transformer_config = Transformer3DModel.load_config(unet_config_path)
+    transformer = Transformer3DModel.from_config(transformer_config)
+    unet_state_dict = safetensors.torch.load_file(unet_ckpt_path)
+    transformer.load_state_dict(unet_state_dict, strict=True)
+    if torch.cuda.is_available():
+        transformer = transformer.cuda()
+    return transformer
+
+
+def load_scheduler(scheduler_dir):
+    scheduler_config_path = scheduler_dir / "scheduler_config.json"
+    scheduler_config = RectifiedFlowScheduler.load_config(scheduler_config_path)
+    return RectifiedFlowScheduler.from_config(scheduler_config)
+
+
+def load_image_to_tensor_with_resize_and_crop(
+    image_path, target_height=512, target_width=768
+):
+    image = Image.open(image_path).convert("RGB")
+    input_width, input_height = image.size
+    aspect_ratio_target = target_width / target_height
+    aspect_ratio_frame = input_width / input_height
+    if aspect_ratio_frame > aspect_ratio_target:
+        new_width = int(input_height * aspect_ratio_target)
+        new_height = input_height
+        x_start = (input_width - new_width) // 2
+        y_start = 0
+    else:
+        new_width = input_width
+        new_height = int(input_width / aspect_ratio_target)
+        x_start = 0
+        y_start = (input_height - new_height) // 2
+
+    image = image.crop((x_start, y_start, x_start + new_width, y_start + new_height))
+    image = image.resize((target_width, target_height))
+    frame_tensor = torch.tensor(np.array(image)).permute(2, 0, 1).float()
+    frame_tensor = (frame_tensor / 127.5) - 1.0
+    # Create 5D tensor: (batch_size=1, channels=3, num_frames=1, height, width)
+    return frame_tensor.unsqueeze(0).unsqueeze(2)
+
+
+def calculate_padding(
+    source_height: int, source_width: int, target_height: int, target_width: int
+) -> tuple[int, int, int, int]:
+
+    # Calculate total padding needed
+    pad_height = target_height - source_height
+    pad_width = target_width - source_width
+
+    # Calculate padding for each side
+    pad_top = pad_height // 2
+    pad_bottom = pad_height - pad_top  # Handles odd padding
+    pad_left = pad_width // 2
+    pad_right = pad_width - pad_left  # Handles odd padding
+
+    # Return padded tensor
+    # Padding format is (left, right, top, bottom)
+    padding = (pad_left, pad_right, pad_top, pad_bottom)
+    return padding
+
+
+def convert_prompt_to_filename(text: str, max_len: int = 20) -> str:
+    # Remove non-letters and convert to lowercase
+    clean_text = "".join(
+        char.lower() for char in text if char.isalpha() or char.isspace()
+    )
+
+    # Split into words
+    words = clean_text.split()
+
+    # Build result string keeping track of length
+    result = []
+    current_length = 0
+
+    for word in words:
+        # Add word length plus 1 for underscore (except for first word)
+        new_length = current_length + len(word)
+
+        if new_length <= max_len:
+            result.append(word)
+            current_length += len(word)
+        else:
+            break
+
+    return "-".join(result)
+
+
+# Generate output video name
+def get_unique_filename(
+    base: str,
+    ext: str,
+    prompt: str,
+    seed: int,
+    resolution: tuple[int, int, int],
+    dir: Path,
+    endswith=None,
+    index_range=1000,
+) -> Path:
+    base_filename = f"{base}_{convert_prompt_to_filename(prompt, max_len=30)}_{seed}_{resolution[0]}x{resolution[1]}x{resolution[2]}"
+    for i in range(index_range):
+        filename = dir / f"{base_filename}_{i}{endswith if endswith else ''}{ext}"
+        if not os.path.exists(filename):
+            return filename
+    raise FileExistsError(
+        f"Could not find a unique filename after {index_range} attempts."
+    )
+
+
+def seed_everething(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 # --------------------------------------------------------------------------------------------
 with open("models.yaml", "r") as file:
     models = yaml.safe_load(file)
@@ -627,34 +787,41 @@ class MyModel(AIxBlockMLBase):
 
                 if prompt == "" or prompt is None:
                     return None, ""
-
+                
                 with torch.no_grad():
                     try:
-                        nf4_config = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_quant_type="nf4",
-                            bnb_4bit_compute_dtype=torch.bfloat16,
-                        )
-                        model_nf4 = FluxTransformer2DModel.from_pretrained(
-                            model_id,
-                            subfolder="transformer",
-                            quantization_config=nf4_config,
-                            torch_dtype=torch.bfloat16,
-                            # device_map=device,
-                        )
-                        pipe = FluxPipeline.from_pretrained(
-                            model_id,
-                            transformer=model_nf4,
-                            torch_dtype=torch.bfloat16,
-                            device_map="balanced",
-                        )
-                        image = pipe(
-                            prompt=prompt,
-                            width=width,
-                            height=height,
-                            num_inference_steps=num_inference_steps,
-                            guidance_scale=guidance_scale,
-                        ).images[0]
+                        import tempfile
+                        img2vid_image="",
+                        prompt="",
+                        txt2vid_analytics_toggle=False,
+                        negative_prompt="",
+                        frame_rate=25,
+                        seed=0,
+                        num_inference_steps=30,
+                        guidance_scale=3,
+                        height=512,
+                        width=768,
+                        num_frames=121,
+                        args = {
+                            "ckpt_dir": "Lightricks/LTX-Video",
+                            "num_inference_steps": num_inference_steps,
+                            "guidance_scale": guidance_scale,
+                            "height": height,
+                            "width": width,
+                            "num_frames": num_frames,
+                            "frame_rate": frame_rate,
+                            "prompt": prompt,
+                            "negative_prompt": negative_prompt,
+                            "seed": 0,
+                            "output_path": os.path.join(tempfile.gettempdir(), "gradio"),
+                            "num_images_per_prompt": 1,
+                            "input_image_path": img2vid_image,
+                            "input_video_path": "",
+                            "bfloat16": True,
+                            "disable_load_needed_only": False
+                        }
+                        logger.warning(f"Running generation with arguments: {args}")
+                        image = self.predict_action(args=args)
                     except Exception as e:
                         logger.error(str(e))
 
@@ -756,172 +923,456 @@ class MyModel(AIxBlockMLBase):
                 return "Model loaded successfully!", gr.update(interactive=True)
             except Exception as e:
                 return f"Error loading model: {str(e)}", gr.update(interactive=False)
+        def preset_changed(preset):
+                preset_options = [
+                {"label": "1216x704, 41 frames", "width": 1216, "height": 704, "num_frames": 41},
+                {"label": "1088x704, 49 frames", "width": 1088, "height": 704, "num_frames": 49},
+                {"label": "1056x640, 57 frames", "width": 1056, "height": 640, "num_frames": 57},
+                {"label": "992x608, 65 frames", "width": 992, "height": 608, "num_frames": 65},
+                {"label": "896x608, 73 frames", "width": 896, "height": 608, "num_frames": 73},
+                {"label": "896x544, 81 frames", "width": 896, "height": 544, "num_frames": 81},
+                {"label": "832x544, 89 frames", "width": 832, "height": 544, "num_frames": 89},
+                {"label": "800x512, 97 frames", "width": 800, "height": 512, "num_frames": 97},
+                {"label": "768x512, 97 frames", "width": 768, "height": 512, "num_frames": 97},
+                {"label": "800x480, 105 frames", "width": 800, "height": 480, "num_frames": 105},
+                {"label": "736x480, 113 frames", "width": 736, "height": 480, "num_frames": 113},
+                {"label": "704x480, 121 frames", "width": 704, "height": 480, "num_frames": 121},
+                {"label": "704x448, 129 frames", "width": 704, "height": 448, "num_frames": 129},
+                {"label": "672x448, 137 frames", "width": 672, "height": 448, "num_frames": 137},
+                {"label": "640x416, 153 frames", "width": 640, "height": 416, "num_frames": 153},
+                {"label": "672x384, 161 frames", "width": 672, "height": 384, "num_frames": 161},
+                {"label": "640x384, 169 frames", "width": 640, "height": 384, "num_frames": 169},
+                {"label": "608x384, 177 frames", "width": 608, "height": 384, "num_frames": 177},
+                {"label": "576x384, 185 frames", "width": 576, "height": 384, "num_frames": 185},
+                {"label": "608x352, 193 frames", "width": 608, "height": 352, "num_frames": 193},
+                {"label": "576x352, 201 frames", "width": 576, "height": 352, "num_frames": 201},
+                {"label": "544x352, 209 frames", "width": 544, "height": 352, "num_frames": 209},
+                {"label": "512x352, 225 frames", "width": 512, "height": 352, "num_frames": 225},
+                {"label": "512x352, 233 frames", "width": 512, "height": 352, "num_frames": 233},
+                {"label": "544x320, 241 frames", "width": 544, "height": 320, "num_frames": 241},
+                {"label": "512x320, 249 frames", "width": 512, "height": 320, "num_frames": 249},
+                {"label": "512x320, 257 frames", "width": 512, "height": 320, "num_frames": 257},
+            ] 
+                if preset != "Custom":
+                    selected = next(item for item in preset_options if item["label"] == preset)
+                    return (
+                        selected["height"],
+                        selected["width"],
+                        selected["num_frames"],
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                    )
+                else:
+                    return (
+                        None,
+                        None,
+                        None,
+                        gr.update(visible=True),
+                        gr.update(visible=True),
+                        gr.update(visible=True),
+                    )
+        def create_advanced_options():
+                with gr.Accordion("Advanced Options (Optional)", open=False):
+                    seed = gr.Slider(label="Seed", minimum=0, maximum=1000000, step=1, value=0)
+                    inference_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=50, step=1, value=30)
+                    guidance_scale = gr.Slider(label="Guidance Scale", minimum=1.0, maximum=5.0, step=0.1, value=3.0)
 
-        @dataclass
-        class Config:
-            guidance_scale = 3.0
-            step = 5
-            width = 512
-            height = 512
-            prompt = ""
+                    height_slider = gr.Slider(
+                        label="Height",
+                        minimum=256,
+                        maximum=1024,
+                        step=64,
+                        value=512,
+                        visible=False,
+                    )
+                    width_slider = gr.Slider(
+                        label="Width",
+                        minimum=256,
+                        maximum=1024,
+                        step=64,
+                        value=768,
+                        visible=False,
+                    )
+                    num_frames_slider = gr.Slider(
+                        label="Number of Frames",
+                        minimum=1,
+                        maximum=200,
+                        step=1,
+                        value=97,
+                        visible=False,
+                    )
 
-        css = """
-            .importantButton {
-                background: linear-gradient(45deg, #7e0570,#5d1c99, #6e00ff) !important;
-                border: none !important;
-            }
-            .importantButton:hover {
-                background: linear-gradient(45deg, #ff00e0,#8500ff, #6e00ff) !important;
-                border: none !important;
-            }
-            .disclaimer {font-variant-caps: all-small-caps; font-size: xx-small;}
-            .xsmall {font-size: x-small;}
+                    return [
+                        seed,
+                        inference_steps,
+                        guidance_scale,
+                        height_slider,
+                        width_slider,
+                        num_frames_slider,
+                    ]
+        preset_options = [
+                {"label": "1216x704, 41 frames", "width": 1216, "height": 704, "num_frames": 41},
+                {"label": "1088x704, 49 frames", "width": 1088, "height": 704, "num_frames": 49},
+                {"label": "1056x640, 57 frames", "width": 1056, "height": 640, "num_frames": 57},
+                {"label": "992x608, 65 frames", "width": 992, "height": 608, "num_frames": 65},
+                {"label": "896x608, 73 frames", "width": 896, "height": 608, "num_frames": 73},
+                {"label": "896x544, 81 frames", "width": 896, "height": 544, "num_frames": 81},
+                {"label": "832x544, 89 frames", "width": 832, "height": 544, "num_frames": 89},
+                {"label": "800x512, 97 frames", "width": 800, "height": 512, "num_frames": 97},
+                {"label": "768x512, 97 frames", "width": 768, "height": 512, "num_frames": 97},
+                {"label": "800x480, 105 frames", "width": 800, "height": 480, "num_frames": 105},
+                {"label": "736x480, 113 frames", "width": 736, "height": 480, "num_frames": 113},
+                {"label": "704x480, 121 frames", "width": 704, "height": 480, "num_frames": 121},
+                {"label": "704x448, 129 frames", "width": 704, "height": 448, "num_frames": 129},
+                {"label": "672x448, 137 frames", "width": 672, "height": 448, "num_frames": 137},
+                {"label": "640x416, 153 frames", "width": 640, "height": 416, "num_frames": 153},
+                {"label": "672x384, 161 frames", "width": 672, "height": 384, "num_frames": 161},
+                {"label": "640x384, 169 frames", "width": 640, "height": 384, "num_frames": 169},
+                {"label": "608x384, 177 frames", "width": 608, "height": 384, "num_frames": 177},
+                {"label": "576x384, 185 frames", "width": 576, "height": 384, "num_frames": 185},
+                {"label": "608x352, 193 frames", "width": 608, "height": 352, "num_frames": 193},
+                {"label": "576x352, 201 frames", "width": 576, "height": 352, "num_frames": 201},
+                {"label": "544x352, 209 frames", "width": 544, "height": 352, "num_frames": 209},
+                {"label": "512x352, 225 frames", "width": 512, "height": 352, "num_frames": 225},
+                {"label": "512x352, 233 frames", "width": 512, "height": 352, "num_frames": 233},
+                {"label": "544x320, 241 frames", "width": 544, "height": 320, "num_frames": 241},
+                {"label": "512x320, 249 frames", "width": 512, "height": 320, "num_frames": 249},
+                {"label": "512x320, 257 frames", "width": 512, "height": 320, "num_frames": 257},
+            ] 
+        css="""
+        #col-container {
+            margin: 0 auto;
+            max-width: 1220px;
+        }
         """
-
-        example_list = [
-            "A cinematic split-frame composition where the lens is half-submerged underwater. Below the surface, a serene and calm lakebed stretches out, softly illuminated by refracted light. A nude woman stands gracefully on the sandy lakebed, her pose tranquil, with her long hair drifting weightlessly in the still water. Above the surface, the storm rages ferociously: lightning streaks across the dark clouds, torrential rain pours down, and towering waves crash violently. In the distance, a weathered, ancient lighthouse struggles against the storm, its flickering light barely piercing the chaos. The waterline is sharp, with bubbles and light refractions enhancing the split effect. Dynamic lighting highlights the emotional contrast between the calm underwater world and the savage storm above. (masterpiece, best quality, ultra-detailed, photorealistic, cinematic:1.3) --ar 16:9 --intense-storm --lens-split --weight 2. 0",
-            "A collage of various abstract shapes and lines, with red accents, on white paper, composition includes black ink and bold strokes, creating an urban feel, geometric elements in the background, adding to its modern aesthetic, digital illustration technique, contemporary look and feel --ar 1:2 --stylize 750",
-            "A close-up shot of a Chernobyl liquidator's gas mask, filling the frame with gritty, realistic detail. The mask is worn and authentic, modeled after Soviet-era designs with rounded lenses, thick rubber seals, and heavy straps, covered in ash and grime from the reactor’s fallout. The lenses are the focal point, each glass surface slightly warped and scratched, reflecting the fierce glow of distant fires within the reactor. Flames dance across the curved lenses in shades of red, orange, and intense yellow, creating a haunting, distorted view of the fiery chaos within. Lighting and Shadow Play: The overall lighting is low and moody, with harsh shadows defining the rugged texture of the mask and highlighting its worn, weathered surface. Dim light from a flickering source to the left illuminates the mask partially, casting deep shadows across the rubber surface, creating an ominous, high-contrast look. Hazy backlighting subtly outlines the mask’s contours, adding depth and a sense of foreboding. Atmospheric Details: The air is thick with smoke and radioactive dust, faintly illuminated by the fiery reflection in the lenses. Tiny, glowing particles float through the air, adding to the toxic, dangerous atmosphere. Thin wisps of smoke drift around the mask, softening the edges and giving the scene a ghostly quality. Surface Texture and Wear: The rubber of the mask is cracked and stained, showing the toll of exposure to radiation and extreme heat. Ash and small flecks of debris cling to its surface, adding realism and a gritty feel. Around the edges, faint condensation gathers on the rubber, hinting at the liquidator’s breath inside the suit. Reflection Details in the Lenses: In the mask's lenses, we see reflections of distant fires raging inside the reactor, with structures burning and twisted metal faintly visible in the intense glow. The reflections are slightly distorted, warped by the rounded glass, as if the fires themselves are bending reality. Occasional flickers of light pulse in the reflection, conveying the flickering intensity of the flames. Mood and Composition: The close-up shot emphasizes the isolation, courage, and silent determination of the liquidator. The composition is hauntingly intimate, placing the viewer face-to-face with the mask, capturing the intensity of the task and the immense, invisible danger surrounding them. Every detail contributes to a heavy, foreboding atmosphere, evoking a sense of dread and silent resilience.",
-            "A vast, cosmic Yggdrasil, the World Tree, stretches into the star-speckled void of space, its massive trunk and sprawling branches connecting the nine realms in Norse mythology. The tree itself appears ancient, with weathered bark and roots that dig deep into the surrounding universe, each level alive with its own distinct world: At the highest branches, a golden realm glows with an ethereal light. Majestic halls with shining towers rise among the branches, surrounded by a shimmering bridge that arcs through the stars, connecting this upper realm to the central trunk. Nearby, a lush, untamed world flourishes with dense forests and flowing rivers, brimming with natural beauty and tranquility. Otherworldly beings, graceful and radiant, can be seen moving through this paradise, embodying peace and balance. A level lower, radiant beings with light and beauty in their form dwell in an enchanted forest, their world illuminated by soft, otherworldly light. Their realm is vibrant, with trees that sparkle as if dusted with stardust, and rivers that flow with a gentle, magical glow. The air is filled with a soft luminescence, creating an almost dreamlike atmosphere. At the central trunk, a rugged, mountainous land stretches across the roots and branches, where humans reside in familiar landscapes of rolling hills, seas, and forests. Humans gaze up at the towering Yggdrasil in awe, their settlements and villages nestled in its shadow, looking like fragile worlds of their own amidst the tree’s vast presence. Nearby, on the tree's rugged branches, hulking beings with immense strength roam amidst icy, craggy mountains and dark forests. Their world is filled with jagged peaks, frozen rivers, and heavy snow, giving the sense of a fierce and untamed wilderness. Towering fortresses built into the cliffs loom ominously, while giant figures peer down from their snow-covered perches, casting an air of silent menace. Further down, twisted roots encircle a dark, cavernous world filled with deep shadows and molten light from subterranean forges. Small but sturdy beings, master craftsmen, toil here, creating intricate weapons and treasures. The dim light reflects off pools of molten metal, illuminating their forge workshops and complex machinery in the gloom. The air is thick with smoke and the glow of embers, giving this level a feeling of constant labor and creation. Below, in a realm shrouded in mist and ice, an icy wasteland extends endlessly, cloaked in a veil of thick fog. Massive glaciers and frozen rivers twist through the foggy landscape, with serpentine creatures moving within the ice, only half-seen beneath the surface. The air is frigid, and ghostly figures appear through the mist, creating an atmosphere of deathly stillness and isolation. Opposite this icy realm, a world ablaze with fire and molten lava seethes with destructive energy. Colossal beings made of fire guard this realm, wielding massive, flame-covered weapons. Rivers of molten fire wind through scorched ground, erupting sporadically as if the very earth is alive with fury. The entire realm glows with a fierce, red-orange light, casting shadows of immense heat and danger. At the deepest root of Yggdrasil, a desolate, shadowed world stretches endlessly. Souls drift aimlessly through a barren landscape, their ghostly forms barely visible through a dark, hazy fog. A distant, imposing structure looms over this shadowed land, giving it a sense of quiet despair and finality, as if all life here has been stripped of hope. Around Yggdrasil: At the very roots of the tree, a massive serpent coils and gnaws, its dark scales glistening, a symbol of decay gnawing away at life. At the topmost branches, a fierce eagle with piercing eyes keeps watch over the realms, embodying wisdom and vigilance. Darting up and down the tree’s trunk is a mischievous squirrel, carrying messages (or perhaps insults) between the eagle above and the serpent below, adding a touch of lively movement and drama to the scene. Atmosphere and Depth: The entire tree glows with a faint, cosmic light, as if alive and breathing. Particles of stardust drift around it, highlighting the different realms in hues of gold, green, blue, and red. In the foreground, fragments of ancient runes hover, casting a dim glow over the scene, anchoring each realm’s unique appearance in an aura of mythic wonder. The cosmos stretches infinitely in the background, with stars and distant galaxies giving depth and scale, making Yggdrasil appear both infinite and ancient.",
-            "astronaut woman, barefoot with perfect foot perfect toe, full body view. Blue short hair, belly piercing, tank top, space suit orange pants, science fiction style rifle. Alien stile starship setting. Searching a xenomorph in the dark corridors with the rifle armed. Graceful and muscular pose, canvas-like style with hyperrealistic details, high resolution for intricate elements, digital illustration with vivid colors, dramatic lighting to enhance the scene.",
-            "A bold and vibrant modern illustration of a beautiful woman leaning towards her reflection in a sleek, frameless mirror. The surface of the mirror ripples like water where her lips meet it for a kiss, creating concentric waves that distort her reflection in a mesmerizing, surreal effect. The reflection appears alive and dynamic, almost as if reaching back to her, enhancing the emotional depth and intrigue of the scene. The woman’s hair flows softly, with a few loose strands catching the light, adding movement to the composition. Her features are illuminated with striking, modern lighting, creating a radiant glow that highlights the contours of her face and shoulders. The background is abstract and minimal, with soft gradients of electric blue and golden hues blending seamlessly, adding a surreal, dreamlike quality. The rippling effect of the mirror is intricate, with delicate reflections of light breaking across the watery surface. Subtle glowing particles and soft, diffused highlights surround the scene, enhancing the magical realism.",
-            "A dark, gritty comic-style illustration, rich with hand-drawn textures, heavy inking, and a worn, weathered aesthetic. On the jagged, desolate surface of the moon, three astronauts in scuffed, retrofuturistic red spacesuits sprint for their lives, kicking up clouds of lunar dust that trail behind them. Their sleek, Soviet-inspired spacesuits are dull and battered, with faded USSR insignias barely visible under scratches and grime. Each astronaut is armed, firing crude, makeshift weapons backward in desperation as they attempt to fend off their alien attackers. In the distance, an ominous alien spacecraft hovers above the lunar horizon, its massive, angular silhouette casting long shadows across the surface. Bright neon-green plasma bolts streak through the darkness, fired from the ship’s glowing, turret-like weapons. The plasma bolts illuminate the gritty scene in brief, blinding flashes, casting jagged shadows and reflecting off the astronauts' scratched visors. The composition is chaotic and dynamic, with the lead astronaut crouched and firing while the others sprint, their postures tense and frantic. One astronaut stumbles, his weapon raised as he looks back in horror at the attackers. The moon's surface is jagged and uneven, littered with sharp rocks, deep craters, and faint traces of long-forgotten alien ruins etched with strange, glowing glyphs. The alien ship is vast and angular, with faint lights along its hull giving it a menacing presence. The Earth looms faintly in the background, partially obscured by lunar dust and darkness. The atmosphere is tense and moody, dominated by muted greys, dusty reds, and bright flashes of neon green from the plasma fire. The illustration is gritty and imperfect, with visible hand-drawn lines, bold inking, and heavy shadows. The texture of the lunar dust and the weathered suits is palpable, creating a tactile, raw aesthetic. The scene feels alive with motion and desperation, capturing the chaotic action of a life-or-death struggle in a hostile, alien world",
-            "An exquisite 8K Ultra HD double exposure image, featuring a majestic lion silhouette seamlessly blended with a vivid African forest sunrise. The lion's details are intricately incorporated into the landscape, creating a stunning visual effect. The monochrome background highlights the lion's white fur, while the sharp focus and crisp lines showcase the incredible level of detail. The full color of the lion contrasts with the white background, evoking a sense of awe and wonder. The overall effect is cinematic, capturing the essence of a breathtaking African sunset. , illustration, photo, cinematic, typography, 3d render",
-            "[Abstract style waterfalls, wildlife] inside the silhouette of a [woman] âs head that is a double exposure photograph . Non-representational, colors and shapes, expression of feelings, imaginative, highly detailed",
-            "A shimmering, translucent wall of liquid-like energy rises from the ground, stretching endlessly into the sky. It hums softly, its surface rippling with iridescent waves of blue, violet, and silver, casting faint reflections onto the terrain around it. The veil divides two worlds: on one side, a vibrant jungle teeming with life. Towering trees with lush, emerald canopies sway gently, their leaves glowing faintly. Exotic creatures with iridescent scales and translucent wings dart between the branches, their colors flashing like living jewels. Streams of crystalline water cascade down ancient rocks, pooling in pristine, reflective ponds, while luminous plants pulse softly in rhythmic harmony. On the other side lies a barren wasteland under a blood-red sky. Cracked earth stretches into the distance, scarred with jagged canyons and dotted with skeletal remnants of a once-thriving world. Blackened, twisted spires rise from the ground, and an oppressive heat radiates from the ground, distorting the air. Lightning forks across the sky, illuminating the scorched terrain for fleeting moments. At the edge of the veil stands a lone figure, their silhouette illuminated by the glowing energy. Their hand hovers just above the surface, fingers outstretched as if daring to touch it. The two realities—one vibrant and alive, the other desolate and broken—are mirrored in their wide, mesmerized eyes. The figure’s stance is tense, caught in a moment of wonder and indecision, their presence the only bridge between the two worlds. The air around the veil crackles faintly, shimmering with barely contained energy. Small tendrils of light curl outward from its surface, brushing against the figure and the ground like ethereal whispers. Fine particles of dust and pollen drift lazily in the light of the jungle, contrasting with the barren emptiness of the wasteland. The scene is vivid and layered, a profound juxtaposition of creation and destruction, framed by the ethereal glow of the veil",
-        ]
-
-        STATS_DEFAULT = SimpleNamespace(llm=None, config=Config())
-
-        # TODO: add trained checkpoint list into model_list
-        # def get_checkpoint_list(project):
-        #     pass
-
-        def generate_btn_handler(
-            prompt: str, guidance_scale: float, step: int, width: int, height: int
-        ) -> tuple:
-            if prompt == "" or prompt is None:
-                raise Exception("Prompt cannot be empty")
-            if pipe_demo is None:
-                raise Exception(
-                    "Please load the model first by clicking 'Load Model' button"
-                )
-
-            image = pipe_demo(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=step,
-                guidance_scale=guidance_scale,
-            ).images[0]
-
-            return image, ""
-
-        with gr.Blocks(
-            theme=gr.themes.Soft(text_size="sm"),
-            title="Flux Image Generator",
-            css=css,
-        ) as demo_txt_to_img:
-            stats = gr.State(STATS_DEFAULT)
-
+        
+        with gr.Blocks(css=css) as demo:
             with gr.Row():
-                with gr.Column(scale=3):
-                    image_field = gr.Image(label="Output Image", elem_id="output_image")
-                with gr.Column(scale=1):
-                    load_model_btn = gr.Button("Load Model", variant="primary")
-                    status_box = gr.Textbox(
-                        label="Model Status",
-                        interactive=False,
-                        value="Model not loaded",
+                with gr.Column():
+                    img2vid_image = gr.Image(
+                        type="filepath",
+                        label="Upload Input Image",
+                        elem_id="image_upload",
+                    )
+
+                    txt2vid_prompt = gr.Textbox(
+                        label="Enter Your Prompt",
+                        placeholder="Describe the video you want to generate (minimum 50 characters)...",
+                        value="A woman with long brown hair and light skin smiles at another woman with long blonde hair. The woman with brown hair wears a black jacket and has a small, barely noticeable mole on her right cheek. The camera angle is a close-up, focused on the woman with brown hair's face. The lighting is warm and natural, likely from the setting sun, casting a soft glow on the scene. The scene appears to be real-life footage.",
+                        lines=5,
+                    )
+                    
+                    txt2vid_analytics_toggle = Toggle(
+                        label="torchao.quantization.",
+                        value=False,
+                        interactive=True,
+                    )
+
+                    txt2vid_negative_prompt = gr.Textbox(
+                        label="Enter Negative Prompt",
+                        placeholder="Describe what you don't want in the video...",
+                        value="low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly",
                         lines=2,
                     )
-            with gr.Row():
-                with gr.Column(scale=3):
-                    prompt = gr.TextArea(
-                        label="Prompt:",
-                        value=example_list[0],
-                        elem_id="small-textarea",
-                        lines=10,
-                        max_lines=8,
-                    )
-                    generate_btn = gr.Button("Generate", interactive=False)
-                with gr.Column(scale=1):
-                    guidance_scale = gr.Slider(
-                        value=STATS_DEFAULT.config.guidance_scale,
-                        minimum=0.0,
-                        maximum=30.0,
-                        step=0.1,
-                        label="Guidance scale",
-                    )
-                    step = gr.Slider(
-                        value=STATS_DEFAULT.config.step,
-                        minimum=3,
-                        maximum=100,
-                        step=10,
-                        label="Step",
-                    )
-                    width = gr.Number(
-                        value=STATS_DEFAULT.config.width,
-                        label="Image width (64-1920)",
-                        precision=0,
-                        minimum=64,
-                        maximum=1920,
-                        interactive=True,
-                    )
-                    height = gr.Number(
-                        value=STATS_DEFAULT.config.width,
-                        label="Image height (64-1080)",
-                        precision=0,
-                        minimum=64,
-                        maximum=1080,
-                        interactive=True,
+
+                    txt2vid_preset = gr.Dropdown(
+                        choices=[p["label"] for p in preset_options],
+                        value="768x512, 97 frames",
+                        label="Choose Resolution Preset",
                     )
 
-            with gr.Accordion("Example inputs", open=True):
-                examples = gr.Examples(
-                    examples=example_list,
-                    inputs=[prompt],
-                    examples_per_page=60,
+                    txt2vid_frame_rate = gr.Slider(
+                        label="Frame Rate",
+                        minimum=21,
+                        maximum=30,
+                        step=1,
+                        value=25,
+                    )
+
+                    txt2vid_advanced = create_advanced_options()
+                    
+                    txt2vid_generate = gr.Button(
+                        "Generate Video",
+                        variant="primary",
+                        size="lg",
+                    )
+
+                with gr.Column():
+                    txt2vid_output = gr.Video(label="Generated Output")
+
+            with gr.Row():
+                gr.Examples(
+                    examples=[
+                        [
+                            "A young woman in a traditional Mongolian dress is peeking through a sheer white curtain, her face showing a mix of curiosity and apprehension. The woman has long black hair styled in two braids, adorned with white beads, and her eyes are wide with a hint of surprise. Her dress is a vibrant blue with intricate gold embroidery, and she wears a matching headband with a similar design. The background is a simple white curtain, which creates a sense of mystery and intrigue.ith long brown hair and light skin smiles at another woman with long blonde hair. The woman with brown hair wears a black jacket and has a small, barely noticeable mole on her right cheek. The camera angle is a close-up, focused on the woman with brown hair’s face. The lighting is warm and natural, likely from the setting sun, casting a soft glow on the scene. The scene appears to be real-life footage",
+                            "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly",
+                        ],
+                        [
+                            "A young man with blond hair wearing a yellow jacket stands in a forest and looks around. He has light skin and his hair is styled with a middle part. He looks to the left and then to the right, his gaze lingering in each direction. The camera angle is low, looking up at the man, and remains stationary throughout the video. The background is slightly out of focus, with green trees and the sun shining brightly behind the man. The lighting is natural and warm, with the sun creating a lens flare that moves across the man’s face. The scene is captured in real-life footage.",
+                            "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly",
+                        ],
+                        [
+                            "A cyclist races along a winding mountain road. Clad in aerodynamic gear, he pedals intensely, sweat glistening on his brow. The camera alternates between close-ups of his determined expression and wide shots of the breathtaking landscape. Pine trees blur past, and the sky is a crisp blue. The scene is invigorating and competitive.",
+                            "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly",
+                        ],
+                    ],
+                    inputs=[txt2vid_prompt, txt2vid_negative_prompt, txt2vid_output],
+                    label="Example Text-to-Video Generations",
                 )
 
-            def load_model_handler():
-                yield "Loading model, please wait...", gr.update(interactive=False)
-                status, btn_update = load_model_fn()
-                if "successfully" in status:
-                    yield status, gr.update(interactive=True)
+            txt2vid_preset.change(fn=preset_changed, inputs=[txt2vid_preset], outputs=txt2vid_advanced[3:])
+            def ltx_video_generate(
+                    img2vid_image="",
+                    prompt="",
+                    txt2vid_analytics_toggle=False,
+                    negative_prompt="",
+                    frame_rate=25,
+                    seed=0,
+                    num_inference_steps=30,
+                    guidance_scale=3,
+                    height=512,
+                    width=768,
+                    num_frames=121,
+            ):
+                import tempfile
+                logger = logging.get_logger(__name__)
+                logger.info("Starting LTX Video generation...")
+        
+                args = {
+                            "ckpt_dir": "Lightricks/LTX-Video",
+                            "num_inference_steps": num_inference_steps,
+                            "guidance_scale": guidance_scale,
+                            "height": height,
+                            "width": width,
+                            "num_frames": num_frames,
+                            "frame_rate": frame_rate,
+                            "prompt": prompt,
+                            "negative_prompt": negative_prompt,
+                            "seed": 0,
+                            "output_path": os.path.join(tempfile.gettempdir(), "gradio"),
+                            "num_images_per_prompt": 1,
+                            "input_image_path": img2vid_image,
+                            "input_video_path": "",
+                            "bfloat16": True,
+                            "disable_load_needed_only": False
+                        }
+                logger.warning(f"Running generation with arguments: {args}")
+
+                seed_everething(args['seed'])
+
+                output_dir = (
+                    Path(args['output_path'])
+                    if args['output_path']
+                    else Path(f"outputs/{datetime.today().strftime('%Y-%m-%d')}")
+                )
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                # Load image
+                if args['input_image_path']:
+                    media_items_prepad = load_image_to_tensor_with_resize_and_crop(
+                        args['input_image_path'], args['height'], args['width']
+                    )
                 else:
-                    yield status, gr.update(interactive=False)
+                    media_items_prepad = None
 
-            # Event handlers
-            generate_btn.click(
-                fn=generate_btn_handler,
-                inputs=[prompt, guidance_scale, step, width, height],
-                outputs=[image_field, prompt],
-                api_name="generate",
+                height = args['height'] if args['height'] else media_items_prepad.shape[-2]
+                width = args['width'] if args['width'] else media_items_prepad.shape[-1]
+                num_frames = args['num_frames']
+
+                if height > MAX_HEIGHT or width > MAX_WIDTH or num_frames > MAX_NUM_FRAMES:
+                    logger.warning(
+                        f"Input resolution or number of frames {height}x{width}x{num_frames} is too big, it is suggested to use the resolution below {MAX_HEIGHT}x{MAX_WIDTH}x{MAX_NUM_FRAMES}."
+                    )
+
+                # Adjust dimensions to be divisible by 32 and num_frames to be (N * 8 + 1)
+                height_padded = ((height - 1) // 32 + 1) * 32
+                width_padded = ((width - 1) // 32 + 1) * 32
+                num_frames_padded = ((num_frames - 2) // 8 + 1) * 8 + 1
+
+                padding = calculate_padding(height, width, height_padded, width_padded)
+
+                logger.warning(
+                    f"Padded dimensions: {height_padded}x{width_padded}x{num_frames_padded}"
+                )
+
+                if media_items_prepad is not None:
+                    media_items = F.pad(
+                        media_items_prepad, padding, mode="constant", value=-1
+                    )  # -1 is the value for padding since the image is normalized to -1, 1
+                else:
+                    media_items = None
+
+                # Paths for the separate mode directories
+                ckpt_dir = Path(args['ckpt_dir'])
+                unet_dir = ckpt_dir / "unet"
+                vae_dir = ckpt_dir / "vae"
+                scheduler_dir = ckpt_dir / "scheduler"
+
+                # Load models
+                vae = load_vae(vae_dir, txt2vid_analytics_toggle)
+                unet = load_unet(unet_dir, txt2vid_analytics_toggle)
+                scheduler = load_scheduler(scheduler_dir)
+                patchifier = SymmetricPatchifier(patch_size=1)
+                text_encoder = T5EncoderModel.from_pretrained(
+                    "PixArt-alpha/PixArt-XL-2-1024-MS", subfolder="text_encoder"
+                ).to(torch.bfloat16)
+
+                # if torch.cuda.is_available():
+                #     text_encoder = text_encoder.to("cuda")
+
+                tokenizer = T5Tokenizer.from_pretrained(
+                    "PixArt-alpha/PixArt-XL-2-1024-MS", subfolder="tokenizer"
+                )
+
+                if args['bfloat16'] and unet.dtype != torch.bfloat16:
+                    unet = unet.to(torch.bfloat16)
+
+                # Use submodels for the pipeline
+                submodel_dict = {
+                    "transformer": unet,
+                    "patchifier": patchifier,
+                    "text_encoder": text_encoder,
+                    "tokenizer": tokenizer,
+                    "scheduler": scheduler,
+                    "vae": vae,
+                }
+
+                pipeline = LTXVideoPipeline(**submodel_dict)
+                if torch.cuda.is_available() and args['disable_load_needed_only']:
+                    pipeline = pipeline.to("cuda")
+
+                # Prepare input for the pipeline
+                sample = {
+                    "prompt": args['prompt'],
+                    "prompt_attention_mask": None,
+                    "negative_prompt": args['negative_prompt'],
+                    "negative_prompt_attention_mask": None,
+                    "media_items": media_items,
+                }
+
+                generator = torch.Generator(
+                    device="cuda" if torch.cuda.is_available() else "cpu"
+                ).manual_seed(args['seed'])
+
+                images = pipeline(
+                    num_inference_steps=args['num_inference_steps'],
+                    num_images_per_prompt=args['num_images_per_prompt'],
+                    guidance_scale=args['guidance_scale'],
+                    generator=generator,
+                    output_type="pt",
+                    callback_on_step_end=None,
+                    height=height_padded,
+                    width=width_padded,
+                    num_frames=num_frames_padded,
+                    frame_rate=args['frame_rate'],
+                    **sample,
+                    is_video=True,
+                    vae_per_channel_normalize=True,
+                    conditioning_method=(
+                        ConditioningMethod.FIRST_FRAME
+                        if media_items is not None
+                        else ConditioningMethod.UNCONDITIONAL
+                    ),
+                    mixed_precision=not args['bfloat16'],
+                    load_needed_only=not args['disable_load_needed_only']
+                ).images
+
+                # Crop the padded images to the desired resolution and number of frames
+                (pad_left, pad_right, pad_top, pad_bottom) = padding
+                pad_bottom = -pad_bottom
+                pad_right = -pad_right
+                if pad_bottom == 0:
+                    pad_bottom = images.shape[3]
+                if pad_right == 0:
+                    pad_right = images.shape[4]
+                images = images[:, :, :num_frames, pad_top:pad_bottom, pad_left:pad_right]
+
+                for i in range(images.shape[0]):
+                    # Gathering from B, C, F, H, W to C, F, H, W and then permuting to F, H, W, C
+                    video_np = images[i].permute(1, 2, 3, 0).cpu().float().numpy()
+                    # Unnormalizing images to [0, 255] range
+                    video_np = (video_np * 255).astype(np.uint8)
+                    fps = args['frame_rate']
+                    height, width = video_np.shape[1:3]
+                    # In case a single image is generated
+                    if video_np.shape[0] == 1:
+                        output_filename = get_unique_filename(
+                            f"image_output_{i}",
+                            ".png",
+                            prompt=args['prompt'],
+                            seed=args['seed'],
+                            resolution=(height, width, num_frames),
+                            dir=output_dir,
+                        )
+                        imageio.imwrite(output_filename, video_np[0])
+                    else:
+                        if args['input_image_path']:
+                            base_filename = f"img_to_vid_{i}"
+                        else:
+                            base_filename = f"text_to_vid_{i}"
+                        output_filename = get_unique_filename(
+                            base_filename,
+                            ".mp4",
+                            prompt=args['prompt'],
+                            seed=args['seed'],
+                            resolution=(height, width, num_frames),
+                            dir=output_dir,
+                        )
+
+                        # Write video
+                        with imageio.get_writer(output_filename, fps=fps) as video:
+                            for frame in video_np:
+                                video.append_data(frame)
+
+                        # Write condition image
+                        if args['input_image_path']:
+                            reference_image = (
+                                (
+                                    media_items_prepad[0, :, 0].permute(1, 2, 0).cpu().data.numpy()
+                                    + 1.0
+                                )
+                                / 2.0
+                                * 255
+                            )
+                            imageio.imwrite(
+                                get_unique_filename(
+                                    base_filename,
+                                    ".png",
+                                    prompt=args['prompt'],
+                                    seed=args['seed'],
+                                    resolution=(height, width, num_frames),
+                                    dir=output_dir,
+                                    endswith="_condition",
+                                ),
+                                reference_image.astype(np.uint8),
+                            )
+                    logger.warning(f"Output saved {output_filename}")
+                    return output_filename
+
+            txt2vid_generate.click(
+                fn=ltx_video_generate,
+                inputs=[
+                    img2vid_image,
+                    txt2vid_prompt,
+                    txt2vid_analytics_toggle,
+                    txt2vid_negative_prompt,
+                    txt2vid_frame_rate,
+                    *txt2vid_advanced,
+                ],
+                outputs=txt2vid_output,
+                concurrency_limit=1,
+                concurrency_id="generate_video",
+                queue=True,
             )
 
-            load_model_btn.click(
-                fn=load_model_handler,
-                inputs=[],
-                outputs=[status_box, generate_btn],
-                api_name=None,
-                queue=True,  # Bắt buộc để enable yield (stream trạng thái)
+            gradio_app, local_url, share_url = demo.launch(
+                share=True,
+                quiet=True,
+                prevent_thread_lock=True,
+                server_name="0.0.0.0",
+                show_error=True,
             )
-
-        with gr.Blocks(css=css) as demo:
-            gr.Markdown("Flux Image Generator")
-            with gr.Tabs():
-                # if task == "text-to-image":
-                with gr.Tab(label=task):
-                    demo_txt_to_img.render()
-
-        gradio_app, local_url, share_url = demo.launch(
-            share=True,
-            quiet=True,
-            prevent_thread_lock=True,
-            server_name="0.0.0.0",
-            show_error=True,
-        )
 
         return {"share_url": share_url, "local_url": local_url}
 
@@ -946,3 +1397,199 @@ class MyModel(AIxBlockMLBase):
 
     def toolbar_predict_sam(self):
         pass
+    def predict_action(args) -> str:
+
+        logger = logging.get_logger(__name__)
+
+        # args = parser.parse_args()
+
+        logger.warning(f"Running generation with arguments: {args}")
+
+        seed_everething(args.seed)
+
+        output_dir = (
+            Path(args.output_path)
+            if args.output_path
+            else Path(f"outputs/{datetime.today().strftime('%Y-%m-%d')}")
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load image
+        if args.input_image_path:
+            media_items_prepad = load_image_to_tensor_with_resize_and_crop(
+                args.input_image_path, args.height, args.width
+            )
+        else:
+            media_items_prepad = None
+
+        height = args.height if args.height else media_items_prepad.shape[-2]
+        width = args.width if args.width else media_items_prepad.shape[-1]
+        num_frames = args.num_frames
+
+        if height > MAX_HEIGHT or width > MAX_WIDTH or num_frames > MAX_NUM_FRAMES:
+            logger.warning(
+                f"Input resolution or number of frames {height}x{width}x{num_frames} is too big, it is suggested to use the resolution below {MAX_HEIGHT}x{MAX_WIDTH}x{MAX_NUM_FRAMES}."
+            )
+
+        # Adjust dimensions to be divisible by 32 and num_frames to be (N * 8 + 1)
+        height_padded = ((height - 1) // 32 + 1) * 32
+        width_padded = ((width - 1) // 32 + 1) * 32
+        num_frames_padded = ((num_frames - 2) // 8 + 1) * 8 + 1
+
+        padding = calculate_padding(height, width, height_padded, width_padded)
+
+        logger.warning(
+            f"Padded dimensions: {height_padded}x{width_padded}x{num_frames_padded}"
+        )
+
+        if media_items_prepad is not None:
+            media_items = F.pad(
+                media_items_prepad, padding, mode="constant", value=-1
+            )  # -1 is the value for padding since the image is normalized to -1, 1
+        else:
+            media_items = None
+
+        # Paths for the separate mode directories
+        ckpt_dir = Path(args.ckpt_dir)
+        unet_dir = ckpt_dir / "unet"
+        vae_dir = ckpt_dir / "vae"
+        scheduler_dir = ckpt_dir / "scheduler"
+
+        # Load models
+        vae = load_vae(vae_dir)
+        unet = load_unet(unet_dir)
+        scheduler = load_scheduler(scheduler_dir)
+        patchifier = SymmetricPatchifier(patch_size=1)
+        text_encoder = T5EncoderModel.from_pretrained(
+            "PixArt-alpha/PixArt-XL-2-1024-MS", subfolder="text_encoder"
+        )
+        if torch.cuda.is_available():
+            text_encoder = text_encoder.to("cuda")
+        tokenizer = T5Tokenizer.from_pretrained(
+            "PixArt-alpha/PixArt-XL-2-1024-MS", subfolder="tokenizer"
+        )
+
+        if args.bfloat16 and unet.dtype != torch.bfloat16:
+            unet = unet.to(torch.bfloat16)
+
+        # Use submodels for the pipeline
+        submodel_dict = {
+            "transformer": unet,
+            "patchifier": patchifier,
+            "text_encoder": text_encoder,
+            "tokenizer": tokenizer,
+            "scheduler": scheduler,
+            "vae": vae,
+        }
+
+        pipeline = LTXVideoPipeline(**submodel_dict)
+        if torch.cuda.is_available():
+            pipeline = pipeline.to("cuda")
+
+        # Prepare input for the pipeline
+        sample = {
+            "prompt": args.prompt,
+            "prompt_attention_mask": None,
+            "negative_prompt": args.negative_prompt,
+            "negative_prompt_attention_mask": None,
+            "media_items": media_items,
+        }
+
+        generator = torch.Generator(
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        ).manual_seed(args.seed)
+
+        images = pipeline(
+            num_inference_steps=args.num_inference_steps,
+            num_images_per_prompt=args.num_images_per_prompt,
+            guidance_scale=args.guidance_scale,
+            generator=generator,
+            output_type="pt",
+            callback_on_step_end=None,
+            height=height_padded,
+            width=width_padded,
+            num_frames=num_frames_padded,
+            frame_rate=args.frame_rate,
+            **sample,
+            is_video=True,
+            vae_per_channel_normalize=True,
+            conditioning_method=(
+                ConditioningMethod.FIRST_FRAME
+                if media_items is not None
+                else ConditioningMethod.UNCONDITIONAL
+            ),
+            mixed_precision=not args.bfloat16,
+        ).images
+
+        # Crop the padded images to the desired resolution and number of frames
+        (pad_left, pad_right, pad_top, pad_bottom) = padding
+        pad_bottom = -pad_bottom
+        pad_right = -pad_right
+        if pad_bottom == 0:
+            pad_bottom = images.shape[3]
+        if pad_right == 0:
+            pad_right = images.shape[4]
+        images = images[:, :, :num_frames, pad_top:pad_bottom, pad_left:pad_right]
+
+        for i in range(images.shape[0]):
+            # Gathering from B, C, F, H, W to C, F, H, W and then permuting to F, H, W, C
+            video_np = images[i].permute(1, 2, 3, 0).cpu().float().numpy()
+            # Unnormalizing images to [0, 255] range
+            video_np = (video_np * 255).astype(np.uint8)
+            fps = args.frame_rate
+            height, width = video_np.shape[1:3]
+            # In case a single image is generated
+            if video_np.shape[0] == 1:
+                output_filename = get_unique_filename(
+                    f"image_output_{i}",
+                    ".png",
+                    prompt=args.prompt,
+                    seed=args.seed,
+                    resolution=(height, width, num_frames),
+                    dir=output_dir,
+                )
+                imageio.imwrite(output_filename, video_np[0])
+            else:
+                if args.input_image_path:
+                    base_filename = f"img_to_vid_{i}"
+                else:
+                    base_filename = f"text_to_vid_{i}"
+                output_filename = get_unique_filename(
+                    base_filename,
+                    ".mp4",
+                    prompt=args.prompt,
+                    seed=args.seed,
+                    resolution=(height, width, num_frames),
+                    dir=output_dir,
+                )
+
+                # Write video
+                with imageio.get_writer(output_filename, fps=fps) as video:
+                    for frame in video_np:
+                        video.append_data(frame)
+
+                # Write condition image
+                if args.input_image_path:
+                    reference_image = (
+                        (
+                            media_items_prepad[0, :, 0].permute(1, 2, 0).cpu().data.numpy()
+                            + 1.0
+                        )
+                        / 2.0
+                        * 255
+                    )
+                    imageio.imwrite(
+                        get_unique_filename(
+                            base_filename,
+                            ".png",
+                            prompt=args.prompt,
+                            seed=args.seed,
+                            resolution=(height, width, num_frames),
+                            dir=output_dir,
+                            endswith="_condition",
+                        ),
+                        reference_image.astype(np.uint8),
+                    )
+            logger.warning(f"Output saved to {output_dir}")
+            return output_filename
+    
