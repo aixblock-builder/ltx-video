@@ -1,7 +1,7 @@
 import os
 import subprocess
 from typing import Any, Dict, Optional
-
+subprocess.run("venv/bin/python -m pip install -r requirements.txt", shell=True)
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
@@ -14,7 +14,7 @@ from model import MyModel, mcp
 # ------------------------------------------------------------------------
 # Load model
 # subprocess.run("venv/bin/python load_model.py", shell=True)
-subprocess.run("venv/bin/python -m pip install -r requirements.txt", shell=True)
+
 
 # Models for request validation
 class InstallServiceRequest(BaseModel):
