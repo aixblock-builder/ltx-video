@@ -55,7 +55,7 @@ imageio[ffmpeg]
 gradio_toggle==2.0.2
 torchao
 
-huggingface_hub[hf_xet]
+huggingface_hub
 apscheduler
 fastapi
 uvicorn
