@@ -58,7 +58,7 @@ from centrifuge import (
     SubscriptionEventHandler,
 )
 from datasets import load_dataset
-from diffusers import FluxPipeline, FluxTransformer2DModel, BitsAndBytesConfig
+# from diffusers import FluxPipeline, FluxTransformer2DModel, BitsAndBytesConfig
 from huggingface_hub import HfApi, HfFolder, hf_hub_download, login
 from mcp.server.fastmcp import FastMCP
 
@@ -72,7 +72,7 @@ from function_ml import (
 )
 from logging_class import start_queue, write_log
 from misc import get_device_count
-from param_class import TrainingConfigFlux, TrainingConfigFluxLora
+# from param_class import TrainingConfigFlux, TrainingConfigFluxLora
 from loguru import logger
 import gc
 import argparse
