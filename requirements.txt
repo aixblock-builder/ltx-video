@@ -43,11 +43,6 @@ sparkdl
 validators
 triton
 sentencepiece==0.2.0
-mcp
-torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
-torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
-torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
-
 # diffusers>=0.28.2
 # transformers==4.44.2
 # sentencepiece>=0.1.96
@@ -59,3 +54,13 @@ imageio[ffmpeg]
 # gradio==5.7.1
 gradio_toggle==2.0.2
 torchao
+
+huggingface_hub[hf_xet]
+apscheduler
+fastapi
+uvicorn
+mcp
+torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
+torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+spaces
