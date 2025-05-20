@@ -13,8 +13,8 @@ from model import MyModel, mcp
 
 # ------------------------------------------------------------------------
 # Load model
-subprocess.run("venv/bin/python load_model.py", shell=True)
-
+# subprocess.run("venv/bin/python load_model.py", shell=True)
+subprocess.run("venv/bin/python -m pip install -r requirements.txt", shell=True)
 
 # Models for request validation
 class InstallServiceRequest(BaseModel):
