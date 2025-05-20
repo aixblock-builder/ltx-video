@@ -868,7 +868,7 @@ class MyModel(AIxBlockMLBase):
         login(token=hf_access_token)
         from huggingface_hub import snapshot_download
         model_path = './data/checkpoint'   # The local directory to save downloaded checkpoint
-        snapshot_download("Lightricks/LTX-Video", local_dir=model_path, local_dir_use_symlinks=False, repo_type='model')
+       
        
         def load_model_fn():
             global pipe_demo, model_nf4
@@ -1112,7 +1112,7 @@ class MyModel(AIxBlockMLBase):
                 import tempfile
                 logger = logging.get_logger(__name__)
                 logger.info("Starting LTX Video generation...")
-        
+                snapshot_download("Lightricks/LTX-Video", local_dir=model_path, local_dir_use_symlinks=False, repo_type='model')
                 args = {
                             "ckpt_dir": "Lightricks/LTX-Video",
                             "num_inference_steps": num_inference_steps,
@@ -1198,6 +1198,7 @@ class MyModel(AIxBlockMLBase):
 
 
                 def load_unet(unet_dir):
+                    # hf_hub_download(repo_id="Lightricks/LTX-Video", local_dir="./data/checkpoint/unet", filename="")
                     unet_ckpt_path = unet_dir / "unet_diffusion_pytorch_model.safetensors"
                     unet_config_path = unet_dir / "config.json"
                     transformer_config = Transformer3DModel.load_config(unet_config_path)
