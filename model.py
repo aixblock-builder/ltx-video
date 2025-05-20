@@ -47,6 +47,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional, get_type_hints
 
 import gradio as gr
+from gradio_toggle import Toggle
 import torch
 import wandb
 import yaml
