@@ -107,36 +107,6 @@ MAX_WIDTH = 1280
 MAX_NUM_FRAMES = 257
 
 
-def load_vae(vae_dir):
-    vae_ckpt_path = vae_dir / "vae_diffusion_pytorch_model.safetensors"
-    vae_config_path = vae_dir / "config.json"
-    with open(vae_config_path, "r") as f:
-        vae_config = json.load(f)
-    vae = CausalVideoAutoencoder.from_config(vae_config)
-    vae_state_dict = safetensors.torch.load_file(vae_ckpt_path)
-    vae.load_state_dict(vae_state_dict)
-    if torch.cuda.is_available():
-        vae = vae.cuda()
-    return vae.to(torch.bfloat16)
-
-
-def load_unet(unet_dir):
-    unet_ckpt_path = unet_dir / "unet_diffusion_pytorch_model.safetensors"
-    unet_config_path = unet_dir / "config.json"
-    transformer_config = Transformer3DModel.load_config(unet_config_path)
-    transformer = Transformer3DModel.from_config(transformer_config)
-    unet_state_dict = safetensors.torch.load_file(unet_ckpt_path)
-    transformer.load_state_dict(unet_state_dict, strict=True)
-    if torch.cuda.is_available():
-        transformer = transformer.cuda()
-    return transformer
-
-
-def load_scheduler(scheduler_dir):
-    scheduler_config_path = scheduler_dir / "scheduler_config.json"
-    scheduler_config = RectifiedFlowScheduler.load_config(scheduler_config_path)
-    return RectifiedFlowScheduler.from_config(scheduler_config)
-
 
 def load_image_to_tensor_with_resize_and_crop(
     image_path, target_height=512, target_width=768
@@ -1209,7 +1179,37 @@ class MyModel(AIxBlockMLBase):
                 unet_dir = ckpt_dir / "unet"
                 vae_dir = ckpt_dir / "vae"
                 scheduler_dir = ckpt_dir / "scheduler"
+                
 
+                def load_vae(vae_dir):
+                    vae_ckpt_path = vae_dir / "vae_diffusion_pytorch_model.safetensors"
+                    vae_config_path = vae_dir / "config.json"
+                    with open(vae_config_path, "r") as f:
+                        vae_config = json.load(f)
+                    vae = CausalVideoAutoencoder.from_config(vae_config)
+                    vae_state_dict = safetensors.torch.load_file(vae_ckpt_path)
+                    vae.load_state_dict(vae_state_dict)
+                    if torch.cuda.is_available():
+                        vae = vae.cuda()
+                    return vae.to(torch.bfloat16)
+
+
+                def load_unet(unet_dir):
+                    unet_ckpt_path = unet_dir / "unet_diffusion_pytorch_model.safetensors"
+                    unet_config_path = unet_dir / "config.json"
+                    transformer_config = Transformer3DModel.load_config(unet_config_path)
+                    transformer = Transformer3DModel.from_config(transformer_config)
+                    unet_state_dict = safetensors.torch.load_file(unet_ckpt_path)
+                    transformer.load_state_dict(unet_state_dict, strict=True)
+                    if torch.cuda.is_available():
+                        transformer = transformer.cuda()
+                    return transformer
+
+
+                def load_scheduler(scheduler_dir):
+                    scheduler_config_path = scheduler_dir / "scheduler_config.json"
+                    scheduler_config = RectifiedFlowScheduler.load_config(scheduler_config_path)
+                    return RectifiedFlowScheduler.from_config(scheduler_config)
                 # Load models
                 vae = load_vae(vae_dir, txt2vid_analytics_toggle)
                 unet = load_unet(unet_dir, txt2vid_analytics_toggle)
