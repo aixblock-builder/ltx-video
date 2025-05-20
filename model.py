@@ -1113,6 +1113,12 @@ class MyModel(AIxBlockMLBase):
                 logger = logging.get_logger(__name__)
                 logger.info("Starting LTX Video generation...")
                 snapshot_download("Lightricks/LTX-Video", local_dir=model_path, local_dir_use_symlinks=False, repo_type='model')
+                snapshot_download(
+                    repo_id="stabilityai/stable-diffusion-2-1",
+                    repo_type="model",
+                    allow_patterns=["unet/*"],  
+                    local_dir= "./data/checkpoint/Lightricks/LTX-Video/unet",
+                )
                 args = {
                             "ckpt_dir": "Lightricks/LTX-Video",
                             "num_inference_steps": num_inference_steps,
@@ -1178,8 +1184,8 @@ class MyModel(AIxBlockMLBase):
                     media_items = None
 
                 # Paths for the separate mode directories
-                ckpt_dir = Path(args['ckpt_dir'])
-                unet_dir = ckpt_dir / "unet"
+                ckpt_dir = "./data/checkpoint/Lightricks/LTX-Video" #Path(args['ckpt_dir'])
+                unet_dir =ckpt_dir /  "unet"
                 vae_dir = ckpt_dir / "vae"
                 scheduler_dir = ckpt_dir / "scheduler"
                 
