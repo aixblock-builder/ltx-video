@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HF_TOKEN = os.getenv("HF_TOKEN", "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")
-HF_ACCESS_TOKEN = os.getenv("HF_ACCESS_TOKEN", "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")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_ACCESS_TOKEN = os.getenv("HF_ACCESS_TOKEN", "")
 WANDB_TOKEN = os.getenv("WANDB_TOKEN", "69b9681e7dc41d211e8c93a3ba9a6fb8d781404a")
 AXB_TOKEN = os.getenv("AXB_TOKEN", "ebcf0ceda01518700f41dfa234b6f4aaea0b57af")
 REPO_ID = "tonyshark/flux"
