@@ -1,0 +1,8 @@
+2025-07-16 17:56:19,555 - vms.ui.project.services.training - INFO - Creating new UI state file with default values
+2025-07-16 17:56:19,557 - vms.ui.project.services.training - INFO - Started background LoRA cleanup task (runs every 10 minutes)
+2025-07-16 17:56:19,557 - vms.ui.project.services.training - INFO - Training service initialized
+2025-07-16 17:56:19,765 - vms.ui.project.services.training - WARNING - Invalid model version for LTX-Video, using default
+2025-07-16 17:56:19,767 - vms.ui.project.services.training - INFO - Updated project state: {'model_project_id': '5cf13242-5f4b-4817-85b8-acf4be73487e', 'project_status': 'draft'}
+2025-07-16 17:56:19,769 - vms.ui.project.services.training - INFO - No checkpoint directories found
+2025-07-16 17:56:20,468 - vms.ui.project.services.training - WARNING - Model weights not found at expected location: .data/models/5cf13242-5f4b-4817-85b8-acf4be73487e/output/pytorch_lora_weights.safetensors
+2025-07-16 17:56:20,470 - vms.ui.project.services.training - INFO - Checking output directory contents: [PosixPath('.data/models/5cf13242-5f4b-4817-85b8-acf4be73487e/output/last_session.log'), PosixPath('.data/models/5cf13242-5f4b-4817-85b8-acf4be73487e/output/ui_state.json')]

@@ -1,0 +1,23 @@
+{
+  "model_project_id": "5cf13242-5f4b-4817-85b8-acf4be73487e",
+  "project_status": "draft",
+  "model_type": "LTX-Video",
+  "model_version": "Lightricks/LTX-Video",
+  "training_type": "LoRA Finetune",
+  "lora_rank": "128",
+  "lora_alpha": "128",
+  "train_steps": 1000,
+  "batch_size": 1,
+  "learning_rate": 3e-05,
+  "save_iterations": 200,
+  "resolution": "SD (1024x576)",
+  "num_gpus": 1,
+  "precomputation_items": 512,
+  "lr_warmup_steps": 200,
+  "auto_resume": false,
+  "control_type": "canny",
+  "train_qk_norm": false,
+  "frame_conditioning_type": "full",
+  "frame_conditioning_index": 0,
+  "frame_conditioning_concatenate_mask": false
+}
