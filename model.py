@@ -734,7 +734,7 @@ class MyModel(AIxBlockMLBase):
                 height = kwargs.get("height", 832)
                 num_frames = kwargs.get("num_frames", 48)
                 guidance_scale = kwargs.get("guidance_scale", 2)
-                flow_shift = kwargs.get("flow_shift", 3)
+                flow_shift = kwargs.get("flow_shift", 3.0)
                 lora_id = kwargs.get("lora_id", None)
                 lora_weight_name = kwargs.get("lora_weight_name", None)
                 lora_scale = kwargs.get("lora_scale", 1.0)

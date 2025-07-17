@@ -421,7 +421,7 @@ class Predict:
         inference_steps: int,
         lora_id: str = None,
         lora_weight_name: str = None,
-        lora_scale = 0.0,
+        lora_scale = 1.0,
         seed: int = -1,
         enable_cpu_offload: bool = True,
         fps: int = 16,
