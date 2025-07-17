@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional, Tuple, Callable
 import time
 import constants as const
 from logging_class import write_log, start_queue
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
 from vms.config import (
     STORAGE_PATH, MODEL_TYPES,
@@ -126,7 +127,8 @@ class Predict:
             if using_lora:
                 lora_path = self.find_latest_lora_weights()
                 if not lora_path:
-                    return None, "Error: No LoRA weights found", log("Error: No LoRA weights found in output directory")
+                    log("Error: No LoRA weights found in output directory")
+                    raise "Error: No LoRA weights found"
                 log(f"Using LoRA weights with scale {lora_scale}")
             else:
                 log("Using original model without LoRA weights")
@@ -146,7 +148,8 @@ class Predict:
             # Get model type (internal name)
             internal_model_type = MODEL_TYPES.get(model_type)
             if not internal_model_type:
-                return None, f"Error: Invalid model type {model_type}", log(f"Error: Invalid model type {model_type}")
+                log(f"Error: Invalid model type {model_type}")
+                raise f"Error: Invalid model type {model_type}"
             
             # Check if model version is valid
             # This section uses model_version directly from parameter
@@ -181,11 +184,13 @@ class Predict:
             model_version_info = versions.get(model_version, {})
             if model_version_info.get("type") in ["image-to-video", "frame-to-video"] and not first_frame_image:
                 model_type_name = "frame conditioning" if model_version_info.get("type") == "frame-to-video" else "conditioning"
-                return None, f"Error: This model requires a {model_type_name} image", log(f"Error: This model version requires a {model_type_name} image but none was provided")
+                log(f"Error: This model version requires a {model_type_name} image but none was provided")
+                raise f"Error: This model requires a {model_type_name} image"
             
             # Additional check for FLF2V models that require both first and last frame
             if model_version_info.get("type") == "frame-to-video" and first_frame_image and not last_frame_image:
-                return None, "Error: FLF2V models require both first and last frame images", log("Error: FLF2V models require both first and last frame images but only first frame was provided")
+                log("Error: FLF2V models require both first and last frame images but only first frame was provided")
+                raise "Error: FLF2V models require both first and last frame images"
             
             log(f"Generating video with model type: {internal_model_type}")
             log(f"Using model version: {model_version}")
@@ -219,11 +224,12 @@ class Predict:
                     model_version, None
                 )
             else:
-                return None, f"Error: Unsupported model type {internal_model_type}", log(f"Error: Unsupported model type {internal_model_type}")
+                log(f"Error: Unsupported model type {internal_model_type}")
+                raise f"Error: Unsupported model type {internal_model_type}"
         
         except Exception as e:
             print("Error generating video")
-            return None, f"Error: {str(e)}", f"Exception occurred: {str(e)}"
+            raise e
     
     def generate_wan_video(
         self,
@@ -363,7 +369,7 @@ class Predict:
                             num_frames=num_frames,
                             guidance_scale=guidance_scale,
                             num_inference_steps=inference_steps,
-                            cross_attention_kwargs={"scale": lora_scale},
+                            # cross_attention_kwargs={"scale": lora_scale},
                             generator=generator,
                         ).frames[0]
                 else:
@@ -412,9 +418,10 @@ class Predict:
         num_frames: int,
         guidance_scale: float,
         flow_shift: float,
-        lora_path: str,
-        lora_scale: float,
         inference_steps: int,
+        lora_id: str = None,
+        lora_weight_name: str = None,
+        lora_scale = 0.0,
         seed: int = -1,
         enable_cpu_offload: bool = True,
         fps: int = 16,
@@ -450,7 +457,7 @@ class Predict:
             
             log_fn(f"Loading pipeline from {model_version}...")
             pipe = LTXPipeline.from_pretrained(model_version, torch_dtype=torch.bfloat16)
-            
+            pipe.scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
             log_fn("Moving pipeline to CUDA device...")
             pipe.to("cuda")
             
@@ -458,12 +465,25 @@ class Predict:
                 log_fn("Enabling model CPU offload...")
                 pipe.enable_model_cpu_offload()
             
-            # Apply LoRA weights if using them
-            if lora_scale > 0 and lora_path:
-                log_fn(f"Loading LoRA weights from {lora_path} with lora scale {lora_scale}...")
-                pipe.load_lora_weights(lora_path)
-            else:
-                log_fn("Using base model without LoRA weights")
+            # Generate video
+            # Load LoRA weights if provided
+            if lora_id and lora_id.strip():
+                try:
+                    # If a specific weight name is provided, use it
+                    if lora_weight_name and lora_weight_name.strip():
+                        pipe.load_lora_weights(lora_id, weight_name=lora_weight_name)
+                    else:
+                        pipe.load_lora_weights(lora_id)
+                    
+                    # Set lora scale if applicable
+                    if hasattr(pipe, "set_adapters_scale") and lora_scale is not None:
+                        pipe.set_adapters_scale(lora_scale)
+                except ValueError as e:
+                    # Return informative error if there are multiple safetensors and no weight name
+                    if "more than one weights file" in str(e):
+                        raise f"Error: The repository '{lora_id}' contains multiple safetensors files. Please specify a weight name using the 'LoRA Weight Name' field."
+                    else:
+                        raise f"Error loading LoRA weights: {str(e)}"
             
             # Create temporary file for the output
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
@@ -484,7 +504,6 @@ class Predict:
                     decode_timestep=0.03,
                     decode_noise_scale=0.025,
                     num_inference_steps=inference_steps,
-                    cross_attention_kwargs={"scale": lora_scale},
                     generator=generator,
                 ).frames[0]
             
@@ -502,14 +521,14 @@ class Predict:
             # Clean up CUDA memory
             pipe = None
             torch.cuda.empty_cache()
-            
-            return output_path, "Video generated successfully!", log_fn(f"Generation completed in {format_time(generation_time)}")
+            log_fn(f"Generation completed in {format_time(generation_time)}")
+            return output_path, "Video generated successfully!"
         
         except Exception as e:
             log_fn(f"Error generating video with LTX: {str(e)}")
             # Clean up CUDA memory
             torch.cuda.empty_cache()
-            return None, f"Error: {str(e)}", log_fn(f"Exception occurred: {str(e)}")
+            raise e
     
     def generate_hunyuan_video(
         self,

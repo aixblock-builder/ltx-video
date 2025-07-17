@@ -122,6 +122,15 @@ async def download_file(path: str):
 
     return FileResponse(full_path, filename=os.path.basename(full_path))
 
+@app.get("/download-generated-video")
+async def download_file(path: str):
+    if not path:
+        raise HTTPException(status_code=400, detail="File name is required")
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(path, filename=os.path.basename(path))
 
 sse = SseServerTransport("/messages/")
 

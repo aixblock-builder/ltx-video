@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import time
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
 from vms.config import (
     STORAGE_PATH, MODEL_TYPES,
@@ -205,14 +206,14 @@ class PreviewingService:
                     full_prompt, negative_prompt, width, height, num_frames,
                     guidance_scale, flow_shift, lora_path, lora_scale,
                     inference_steps, seed, enable_cpu_offload, fps, log,
-                    model_version, conditioning_image
+                    model_version, None
                 )
             elif internal_model_type == "hunyuan_video":
                 return self.generate_hunyuan_video(
                     full_prompt, negative_prompt, width, height, num_frames,
                     guidance_scale, flow_shift, lora_path, lora_scale,
                     inference_steps, seed, enable_cpu_offload, fps, log,
-                    model_version, conditioning_image
+                    model_version, None
                 )
             else:
                 return None, f"Error: Unsupported model type {internal_model_type}", log(f"Error: Unsupported model type {internal_model_type}")
@@ -446,6 +447,7 @@ class PreviewingService:
             
             log_fn(f"Loading pipeline from {model_version}...")
             pipe = LTXPipeline.from_pretrained(model_version, torch_dtype=torch.bfloat16)
+            pipe.scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
             
             log_fn("Moving pipeline to CUDA device...")
             pipe.to("cuda")
@@ -479,7 +481,7 @@ class PreviewingService:
                 decode_timestep=0.03,
                 decode_noise_scale=0.025,
                 num_inference_steps=inference_steps,
-                cross_attention_kwargs={"scale": lora_scale},
+                # cross_attention_kwargs={"scale": lora_scale},
                 generator=generator,
             ).frames[0]
             

@@ -729,21 +729,19 @@ class MyModel(AIxBlockMLBase):
             try:
                 prompt = kwargs.get("prompt", None)
                 negative_prompt = kwargs.get("negative_prompt", None)
-                model_type = kwargs.get("model_type", "ltx_video")
                 model_version = kwargs.get("model_version", "Lightricks/LTX-Video")
-                promt_prefix = kwargs.get("promt_prefix", None)
-                width = kwargs.get("width", 1024)
-                height = kwargs.get("height", 1024)
+                width = kwargs.get("width", 480)
+                height = kwargs.get("height", 832)
                 num_frames = kwargs.get("num_frames", 48)
                 guidance_scale = kwargs.get("guidance_scale", 2)
                 flow_shift = kwargs.get("flow_shift", 3)
-                lora_scale = kwargs.get("lora_scale", 1)
+                lora_id = kwargs.get("lora_id", None)
+                lora_weight_name = kwargs.get("lora_weight_name", None)
+                lora_scale = kwargs.get("lora_scale", 1.0)
                 seed = kwargs.get("seed", -1)
                 enable_cpu_offload = kwargs.get("enable_cpu_offload", True)
                 fps = kwargs.get("fps", 16)
-                inference_steps = kwargs.get("inference_steps", 4)
-                first_frame_image = kwargs.get("first_frame_image", None)
-                last_frame_image = kwargs.get("last_frame_image", None)
+                inference_steps = kwargs.get("inference_steps", 24)
                 base_url = kwargs.get("base_url", "")
                 channel_log = kwargs.get("channel_log", const.CHANNEL_LOGS_COMMON)
 
@@ -754,29 +752,25 @@ class MyModel(AIxBlockMLBase):
                     return None, ""
                 
                 predictor = predict_service.Predict(channel_log)
-                output_path = predictor.generate_video(
+                output_path, message = predictor.generate_ltx_video(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
-                    model_type=model_type,
-                    model_version=model_version,
-                    promt_prefix=promt_prefix,
                     width=width,
                     height=height,
                     num_frames=num_frames,
                     guidance_scale=guidance_scale,
                     flow_shift=flow_shift,
+                    lora_id=lora_id,
+                    lora_weight_name=lora_weight_name,
                     lora_scale=lora_scale,
+                    inference_steps=inference_steps,
                     seed=seed,
                     enable_cpu_offload=enable_cpu_offload,
                     fps=fps,
-                    inference_steps=inference_steps,
-                    first_frame_image=first_frame_image,
-                    last_frame_image=last_frame_image,
+                    model_version=model_version,
                 )
-                download_url = f"{base_url}/downloads?path={output_path}"
-
-                logger.info(result)
-
+                download_url  = f"{base_url}download-generated-video?path={output_path}"
+                print(message)
                 predictions.append({
                     'result': [{
                         'from_name': "text",
