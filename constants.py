@@ -27,6 +27,7 @@ TASK = "text-to-image"
 WORLD_SIZE = 1
 RANK = 0
 CHANNEL_LOGS = "training_logs.txt"
+CHANNEL_LOGS_COMMON = "common_logs.txt"
 
 # model, minimum
 MODEL_ID = "black-forest-labs/FLUX.1-dev"

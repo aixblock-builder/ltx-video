@@ -728,88 +728,64 @@ class MyModel(AIxBlockMLBase):
         elif command.lower() == "predict":
             try:
                 prompt = kwargs.get("prompt", None)
-                model_id = kwargs.get("model_id", "black-forest-labs/FLUX.1-dev")
-                chkpt_name = kwargs.get("checkpoint", None)
+                negative_prompt = kwargs.get("negative_prompt", None)
+                model_type = kwargs.get("model_type", "ltx_video")
+                model_version = kwargs.get("model_version", "Lightricks/LTX-Video")
+                promt_prefix = kwargs.get("promt_prefix", None)
                 width = kwargs.get("width", 1024)
                 height = kwargs.get("height", 1024)
-                num_inference_steps = kwargs.get("num_inference_steps", 4)
+                num_frames = kwargs.get("num_frames", 48)
                 guidance_scale = kwargs.get("guidance_scale", 2)
-                format = kwargs.get("format", "JPEG")
+                flow_shift = kwargs.get("flow_shift", 3)
+                lora_scale = kwargs.get("lora_scale", 1)
+                seed = kwargs.get("seed", -1)
+                enable_cpu_offload = kwargs.get("enable_cpu_offload", True)
+                fps = kwargs.get("fps", 16)
+                inference_steps = kwargs.get("inference_steps", 4)
+                first_frame_image = kwargs.get("first_frame_image", None)
+                last_frame_image = kwargs.get("last_frame_image", None)
+                base_url = kwargs.get("base_url", "")
+                channel_log = kwargs.get("channel_log", const.CHANNEL_LOGS_COMMON)
 
+                print("Predicting...")
                 predictions = []
-
+                import predict_service
                 if prompt == "" or prompt is None:
                     return None, ""
                 
-                with torch.no_grad():
-                    try:
-                        import tempfile
-                        img2vid_image="",
-                        prompt="",
-                        txt2vid_analytics_toggle=False,
-                        negative_prompt="",
-                        frame_rate=25,
-                        seed=0,
-                        num_inference_steps=30,
-                        guidance_scale=3,
-                        height=512,
-                        width=768,
-                        num_frames=121,
-                        args = {
-                            "ckpt_dir": "Lightricks/LTX-Video",
-                            "num_inference_steps": num_inference_steps,
-                            "guidance_scale": guidance_scale,
-                            "height": height,
-                            "width": width,
-                            "num_frames": num_frames,
-                            "frame_rate": frame_rate,
-                            "prompt": prompt,
-                            "negative_prompt": negative_prompt,
-                            "seed": 0,
-                            "output_path": os.path.join(tempfile.gettempdir(), "gradio"),
-                            "num_images_per_prompt": 1,
-                            "input_image_path": img2vid_image,
-                            "input_video_path": "",
-                            "bfloat16": True,
-                            "disable_load_needed_only": False
-                        }
-                        logger.warning(f"Running generation with arguments: {args}")
-                        image = self.predict_action(args=args)
-                    except Exception as e:
-                        logger.error(str(e))
-
-                buffered = BytesIO()
-                image.save(buffered, format=format)
-                image.save(const.PROJ_DIR.joinpath(f"image.{format}"))
-                img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                generated_url = f"/downloads?path=image.{format}"
-
-                del pipe, model_nf4
-                gc.collect()
-                torch.cuda.empty_cache()
-
-                result = {
-                    "model_version": model_id,
-                    "result": {
-                        "format": format,
-                        "image": img_base64,
-                        "image_url": generated_url,
-                    },
-                }
+                predictor = predict_service.Predict(channel_log)
+                output_path = predictor.generate_video(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    model_type=model_type,
+                    model_version=model_version,
+                    promt_prefix=promt_prefix,
+                    width=width,
+                    height=height,
+                    num_frames=num_frames,
+                    guidance_scale=guidance_scale,
+                    flow_shift=flow_shift,
+                    lora_scale=lora_scale,
+                    seed=seed,
+                    enable_cpu_offload=enable_cpu_offload,
+                    fps=fps,
+                    inference_steps=inference_steps,
+                    first_frame_image=first_frame_image,
+                    last_frame_image=last_frame_image,
+                )
+                download_url = f"{base_url}/downloads?path={output_path}"
 
                 logger.info(result)
 
                 predictions.append({
                     'result': [{
-                        'from_name': "generated_text",
-                        'to_name': "text_output",
-                        'type': 'textarea',
+                        'from_name': "text",
+                        'to_name': "video",
                         'value': {
-                            'text': [img_base64],
-                            "generated_url": generated_url
+                            'download_url': download_url
                         }
                     }],
-                    'model_version': ""
+                    'model_version': model_version
                 })
 
                 return {"message": "predict completed successfully", "result": predictions}

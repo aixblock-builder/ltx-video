@@ -80,3 +80,4 @@ polars
 open_clip_torch
 av==14.1.0
 git+https://github.com/LLaVA-VL/LLaVA-NeXT.git
+python-dotenv

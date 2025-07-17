@@ -2,7 +2,7 @@ import os
 import subprocess
 from typing import Any, Dict, Optional
 # subprocess.run("venv/bin/python -m pip install -r requirements.txt", shell=True)
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from mcp.server.sse import SseServerTransport
@@ -61,10 +61,11 @@ class ActionRequest(BaseModel):
 
 
 @app.post("/action")
-async def action(request: ActionRequest):
+async def action(request: Request, rq_body: ActionRequest = Body(...)):
     try:
-        print(request.command, request.params)
-        result = model.action(request.command, **request.params)
+        rq_body.params["base_url"] = request.base_url
+        print(rq_body.command, rq_body.params)
+        result = model.action(rq_body.command, **rq_body.params)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
